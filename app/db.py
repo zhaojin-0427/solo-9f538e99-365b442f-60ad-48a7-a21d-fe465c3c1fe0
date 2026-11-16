@@ -83,6 +83,53 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_instance ON reports(instance_id, created_at);
+
+-- ---------------------------------------------------------------- supply
+-- Append-only change log: every business mutation (instance correction,
+-- package revision, check producing a report) appends its supply effect in
+-- the SAME transaction, so business state and downstream-visible changes
+-- commit atomically.  ``seq`` is the global, monotonic consumption order.
+CREATE TABLE IF NOT EXISTS supply_events (
+    seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id    TEXT NOT NULL,
+    package_id     TEXT NOT NULL,
+    op             TEXT NOT NULL,            -- upsert | withdraw
+    reason         TEXT NOT NULL,            -- instance_revised | package_revised | report_feasible | report_not_suppliable
+    report_id      TEXT,                     -- set on upsert / report-driven withdraw
+    instance_revision INTEGER,               -- supplied two-side revisions (upsert)
+    package_revision  INTEGER,
+    facts_json     TEXT,                     -- upsert payload; NULL on withdraw
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_supply_events_seq ON supply_events(seq);
+
+-- A sync session materialises the full snapshot at creation time (fixed
+-- committed state) plus the log high-water mark; paging then walks the
+-- immutable snapshot first and only afterwards the event tail.
+CREATE TABLE IF NOT EXISTS sync_sessions (
+    id              TEXT PRIMARY KEY,
+    tail_after_seq  INTEGER NOT NULL,        -- events with seq > this are incremental
+    snapshot_total  INTEGER NOT NULL,
+    page_size       INTEGER NOT NULL,
+    cursor_key      TEXT NOT NULL,           -- HMAC key for this session's cursors
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_snapshot (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sync_id         TEXT NOT NULL REFERENCES sync_sessions(id),
+    instance_id     TEXT NOT NULL,
+    package_id      TEXT NOT NULL,
+    report_id       TEXT NOT NULL,
+    instance_revision INTEGER NOT NULL,
+    package_revision  INTEGER NOT NULL,
+    facts_json      TEXT NOT NULL,
+    UNIQUE(sync_id, instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_snapshot_page
+    ON sync_snapshot(sync_id, id);
 """
 
 

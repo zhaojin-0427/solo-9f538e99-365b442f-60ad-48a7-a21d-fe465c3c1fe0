@@ -82,7 +82,18 @@ def main() -> int:
             {"instance": (f"instance-{scenario}.xml", xml)},
         )
         assert status == 201, raw
-        print(f"[seed] uploaded instance-{scenario}")
+        instance_id = json.loads(raw)["instance_id"]
+        # Run a check on every scenario so the supply API has data to offer:
+        # feasible/rounding supply facts, infeasible/pending stay withheld.
+        req = urllib.request.Request(
+            f"{BASE}/instances/{instance_id}/checks",
+            headers={"Expected-Instance-Revision": "1",
+                     "Expected-Package-Revision": "1"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200, resp.read()
+        print(f"[seed] uploaded + checked instance-{scenario}")
     MARKER.touch()
     print(f"[seed] done; package_id={package_id}")
     return 0

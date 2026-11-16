@@ -57,6 +57,66 @@ docker compose up --build
 | GET | `/reports/{id}` | 单份报告 |
 | GET | `/reports/{id}/snapshots/{kind}` | 下载报告保存的原始依据 |
 
+## 供数 API（全量接续增量，供下游仓库同步）
+
+仓库接入员通过同步会话持续拉取**可用事实**；报表更正后旧值必须撤回。
+
+### 供数资格（逐实例）
+
+每份实例只可能有一个供数来源：**当前实例修订与当前关系包修订下、最后提交的
+非迟到（`late=false`）、未过期（`superseded=false`）报告，且结论必须为
+`feasible`**。待补（pending）、无解（infeasible）与迟到报告一律不供数；
+尚无报告的实例同样不出现。供数负载逐事实列出 `concept`、报告金额
+`reported_value` 与 `decimals`，并带实例号、报告号、两侧修订。
+
+### 全量 + 增量语义
+
+- `POST /syncs` 创建同步会话：在**一个事务内**物化全量快照（固定同一已提交
+  状态）并记录事件日志高水位 `tail_after_seq`。会话之后的任何更正都不会改动
+  快照行——翻页期间旧页内容保持不变。
+- `GET /syncs/{id}/pages` 首次不带游标，先按 `page_size` 翻完不可变快照
+  （`phase=snapshot`），再进入增量尾（`phase=tail`）。游标为不透明 HMAC 签名
+  token，绑定本会话；**重试同一游标返回同页与同一后继游标**，重启后依旧有效
+  （会话、快照、事件全部在 SQLite 命名卷中）。
+- 追平后 `has_more=false`，但 `next_cursor` 仍可反复轮询，新提交的更正会
+  接续出现。每条操作带稳定去重标识 `op_id`（`snap-{id}` / `evt-{seq}`），
+  重复消费可识别。
+- 增量按**逐实例整组**投递：
+  - 实例更正 → 该实例 `withdraw`（`reason=instance_revised`）；
+  - 关系包修订 → 包下每个实例各一条 `withdraw`（`reason=package_revised`）；
+  - 重新核查合格（feasible）→ 整组 `upsert`（`reason=report_feasible`），
+    含全部概念的报告金额与 decimals；
+  - 核查结论为 pending/infeasible → `withdraw`（`reason=report_not_suppliable`）；
+  - 迟到补报不产生任何供数事件，仅存历史。
+- 事件与业务变更在**同一 SQLite 事务**提交：更正/核查失败时事件一起回滚，
+  失败均不变。快照高水位与事件序号保证全量与增量交界不丢更正。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/syncs?page_size=N` | 创建同步会话（默认 100，上限 500） |
+| GET | `/syncs`、`/syncs/{id}` | 会话列表 / 详情（快照总数、水位） |
+| GET | `/syncs/{id}/pages?cursor=...` | 翻页：快照 → 增量；操作含 upsert/withdraw |
+
+### 供数操作负载示例
+
+```json
+{
+  "op": "upsert",
+  "op_id": "evt-12",
+  "seq": 12,
+  "instance_id": "inst_...",
+  "package_id": "pkg_...",
+  "report_id": "rpt_...",
+  "instance_revision": 3,
+  "package_revision": 1,
+  "reason": "report_feasible",
+  "facts": [
+    {"concept": "acct:Assets", "reported_value": 500.0, "decimals": 0}
+  ]
+}
+```
+`withdraw` 操作只含实例/包定位信息，`facts` 为 `null`，下游据此删除旧值。
+
 ## 本地开发与自测
 
 ```bash
@@ -67,8 +127,8 @@ uv venv .venv && uv pip install -r requirements.txt pytest httpx -p .venv
 ## 目录
 
 ```
-app/            FastAPI 应用、解析器、求解器、SQLite 持久化
-tests/          28 个端到端/单元测试 + 样本 XBRL
-scripts/        容器首启演示数据播种
+app/            FastAPI 应用、解析器、求解器、SQLite 持久化、供数同步（sync.py）
+tests/          43 个端到端/单元测试 + 样本 XBRL（含 14 个供数同步测试）
+scripts/        容器首启演示数据播种（自动核查 4 个场景，供 /docs 直接同步）
 Dockerfile, docker-compose.yml
 ```

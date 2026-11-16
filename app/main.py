@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, Form, Header, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
 
-from . import storage
+from . import storage, sync
 from .db import init_db
 from .errors import ApiError
-from .models import (CheckAck, InstanceOut, PackageOut, ReportList, ReportOut)
+from .models import (CheckAck, InstanceOut, PackageOut, ReportList, ReportOut,
+                     SupplyPage, SyncSessionOut)
 
 
 @asynccontextmanager
@@ -143,3 +144,31 @@ def report_snapshot(report_id: str, kind: str):
         raise BadPayload("kind must be one of instance, xsd, calc")
     data, media = storage.get_report_snapshot(report_id, kind)
     return Response(content=data, media_type=media)
+
+
+# ------------------------------------------------------------- supply / sync
+@app.post("/syncs", response_model=SyncSessionOut, status_code=201,
+          tags=["supply"],
+          summary="创建同步会话：固定同一已提交状态的全量快照 + 增量水位")
+def create_sync(page_size: int = Query(sync.DEFAULT_PAGE_SIZE, ge=1,
+                                       le=sync.MAX_PAGE_SIZE)):
+    return sync.create_session(page_size)
+
+
+@app.get("/syncs", response_model=list[SyncSessionOut], tags=["supply"],
+         summary="列出全部同步会话")
+def list_syncs():
+    return sync.list_sessions()
+
+
+@app.get("/syncs/{sync_id}", response_model=SyncSessionOut, tags=["supply"],
+         summary="同步会话详情（快照总数、增量水位、页大小）")
+def get_sync(sync_id: str):
+    return sync.get_session(sync_id)
+
+
+@app.get("/syncs/{sync_id}/pages", response_model=SupplyPage, tags=["supply"],
+         summary="翻页：先全量快照（旧页内容不变），追平后沿游标接收增量整组替换/撤回")
+def get_sync_page(sync_id: str, cursor: Optional[str] = Query(
+    None, description="上一页返回的 next_cursor；首次请求留空；重试同游标返回同页")):
+    return sync.fetch_page(sync_id, cursor)

@@ -114,3 +114,41 @@ class ReportList(BaseModel):
     instance_id: str
     current: Optional[ReportOut] = None
     history: list[ReportOut]
+
+
+# ---------------------------------------------------------------- supply API
+class SupplyFact(BaseModel):
+    concept: str
+    reported_value: float
+    decimals: object  # int or the string "INF"
+
+
+class SupplyOperation(BaseModel):
+    op: Literal["upsert", "withdraw"]
+    op_id: str = Field(description="去重标识：snap-{id} 或 evt-{seq}；重复消费可识别")
+    instance_id: str
+    package_id: str
+    reason: str
+    report_id: Optional[str] = None
+    instance_revision: Optional[int] = None
+    package_revision: Optional[int] = None
+    facts: Optional[list[SupplyFact]] = None
+    seq: Optional[int] = None
+
+
+class SupplyPage(BaseModel):
+    sync_id: str
+    phase: Literal["snapshot", "tail"]
+    page_size: int
+    snapshot_total: int
+    has_more: bool
+    next_cursor: str
+    operations: list[SupplyOperation]
+
+
+class SyncSessionOut(BaseModel):
+    sync_id: str
+    created_at: str
+    page_size: int
+    snapshot_total: int
+    tail_after_seq: int

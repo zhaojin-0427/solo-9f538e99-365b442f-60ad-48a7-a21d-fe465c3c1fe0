@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from . import db
+from . import db, sync
 from .errors import NotFound, StaleRevision
 from .instance import parse_instance
 from .solver import check_facts
@@ -66,6 +66,16 @@ def revise_package(pid: str, expected_revision: int, xsd: bytes, calc: bytes) ->
             "UPDATE packages SET latest_rev=?, updated_at=? WHERE id=?",
             (new_rev, now, pid),
         )
+        # Any basis correction withdraws every downstream value of the package;
+        # each affected instance may only re-enter after a fresh qualifying check.
+        inst_rows = conn.execute(
+            "SELECT id FROM instances WHERE package_id=?", (pid,)
+        ).fetchall()
+        for r in inst_rows:
+            sync.append_event(
+                conn, instance_id=r["id"], package_id=pid, op="withdraw",
+                reason="package_revised", now=now,
+            )
     return get_package(pid)
 
 
@@ -159,6 +169,12 @@ def revise_instance(iid: str, expected_package_revision: int, raw: bytes) -> dic
         conn.execute(
             "UPDATE instances SET latest_rev=?, updated_at=? WHERE id=?",
             (new_rev, now, iid),
+        )
+        # The old report rests on a corrected instance basis: its supplied
+        # values are withdrawn until a re-check proves them again.
+        sync.append_event(
+            conn, instance_id=iid, package_id=row["package_id"], op="withdraw",
+            reason="instance_revised", now=now,
         )
     return get_instance(iid)
 
@@ -330,6 +346,23 @@ def run_check(iid: str, expected_instance_revision: int,
                 "UPDATE reports SET superseded=1 WHERE instance_id=? AND id!=?",
                 (iid, report_id),
             )
+            # Supply effect of the new report, in the same transaction:
+            # only a feasible, current report may replace downstream values;
+            # pending/infeasible reports withdraw whatever was supplied before.
+            if result["status"] == "feasible":
+                sync.append_event(
+                    conn, instance_id=iid, package_id=inst_row["package_id"],
+                    op="upsert", reason="report_feasible", report_id=report_id,
+                    instance_revision=i_rev["revision"],
+                    package_revision=p_rev["revision"],
+                    facts=sync.facts_from_witness(result["witness"]), now=now,
+                )
+            else:
+                sync.append_event(
+                    conn, instance_id=iid, package_id=inst_row["package_id"],
+                    op="withdraw", reason="report_not_suppliable",
+                    report_id=report_id, now=now,
+                )
 
     out = _report_out(dict(conn.execute(
         "SELECT * FROM reports WHERE id=?", (report_id,)
